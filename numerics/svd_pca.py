@@ -18,7 +18,7 @@ class PCA:
     def __init__(self, n_components: int = 10):
         self.n_components = n_components
         self.mean_ = None
-        self.n_components = None
+        self.components_ = None
         self.sigma_ = None
         self.explained_variance_ratio_ = None
 

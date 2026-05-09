@@ -12,7 +12,6 @@ from numerics.linear_solvers import condition_number, is_well_conditioned
 from numerics.interpolation import cubic_spline, cubic_spline_evaluate
 
 
-
 class WeatherForecaster:
     def __init__(self, nc_path: str, target_var: str = "t2m", n_lags: int = 6, n_pca: int = 8, lead_hours: int = 6, lam: float = 1e-3, smooth_sigma: float = 1.0):
         self.nc_path = nc_path
@@ -25,6 +24,7 @@ class WeatherForecaster:
 
         self.pca_ = None
         self.normalizer_ = None
+        self.target_normalizer_ = None
         self.weights_ = None
         self.bias_ = None
         self.feature_names_ = None
@@ -32,6 +32,7 @@ class WeatherForecaster:
         self.X_norm_ = None
         self.y_norm_ = None
         self.condition_number_ = None
+        self.Z_ = None
 
     def fit(self, optimizer: str = "lstsq"):
         print("─" * 55)
@@ -45,17 +46,20 @@ class WeatherForecaster:
         print("[3/5] PCA compression …")
         self.pca_ = PCA(n_components=self.n_pca)
         self.pca_.fit(X_raw)
-        Z = self.pca_.transform(X_raw)
+        self.Z_ = self.pca_.transform(X_raw)
         k_needed = self.pca_.choose_k(0.95)
         print(f"      {self.n_pca} components explain "
               f"{100 * self.pca_.cumulative_variance()[self.n_pca - 1]:.1f}% variance "
               f"(95% threshold needs {k_needed})")
 
         print("[4/5] Building lag-feature matrix …")
-        X_lag, y = self._make_lag_matrix(Z,target_col=0, target_raw=self._get_target_series())
+        X_lag, y_raw = self._make_lag_matrix(self.Z_, target_raw=self._get_target_series())
 
         self.normalizer_ = Normalizer()
         X_norm = self.normalizer_.fit_transform(X_lag)
+
+        self.target_normalizer_ = Normalizer()
+        y = self.target_normalizer_.fit_transform(y_raw.reshape(-1, 1)).ravel()
 
         well, kappa = is_well_conditioned(X_norm.T @ X_norm)
         self.condition_number_ = kappa
@@ -88,17 +92,12 @@ class WeatherForecaster:
         self.y_norm_ = y
         return self
 
-
     def predict(self, n_steps: int = 24) -> dict:
         if self.weights_ is None:
             raise RuntimeError("Call fit() first.")
 
-        Z = self.pca_.transform(
-            build_features(self.data_, self.smooth_sigma)[0])
-        target = self._get_target_series()
-        _, y_all = self._make_lag_matrix(Z, target_col=0, target_raw=target)
-
         lag_window = self.X_norm_[-1].copy()
+        last_Z = self.Z_[-1].copy()
         preds = []
 
         for _ in range(n_steps):
@@ -106,26 +105,26 @@ class WeatherForecaster:
             y_hat = x_b @ np.append(self.weights_, self.bias_)
             preds.append(y_hat)
             lag_window = np.roll(lag_window, -self.n_pca)
-            lag_window[-self.n_pca:] = y_hat  # simplified: repeat scalar
+            lag_window[-self.n_pca:] = last_Z
 
         preds = np.array(preds)
+        preds_physical = self.target_normalizer_.inverse_transform(preds.reshape(-1, 1)).ravel()
         steps = np.arange(n_steps)
 
         if n_steps > 3:
-            spdata = cubic_spline(steps.astype(float), preds, mode="natural")
+            spdata = cubic_spline(steps.astype(float), preds_physical, mode="natural")
             fine = np.linspace(0, n_steps - 1, n_steps * 4)
             smooth = cubic_spline_evaluate(spdata, fine)
         else:
-            fine, smooth = steps.astype(float), preds
+            fine, smooth = steps.astype(float), preds_physical
 
-        return {"steps": steps, "forecast": preds, "fine_steps": fine, "forecast_smooth": smooth}
-
+        return {"steps": steps, "forecast": preds_physical, "fine_steps": fine, "forecast_smooth": smooth}
 
     def _get_target_series(self) -> np.ndarray:
         arr = self.data_[self.target_var]
         return arr.mean(axis=(1, 2)).astype(float)
 
-    def _make_lag_matrix(self, Z: np.ndarray, target_col: int,  target_raw: np.ndarray) -> tuple:
+    def _make_lag_matrix(self, Z: np.ndarray, target_raw: np.ndarray) -> tuple:
         T = len(Z)
         start = self.n_lags
         end = T - self.lead_hours

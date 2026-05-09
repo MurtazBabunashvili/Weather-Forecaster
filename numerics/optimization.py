@@ -57,7 +57,7 @@ def least_squares_normal(X, y, lam=0.0):
         w, _, _, _ = np.linalg.lstsq(XtX, Xty, rcond=None)
     return w
 
-def _choleksy(A):
+def _cholesky(A):
     A = np.array(A, dtype=float)
     n = A.shape[0]
     L = np.zeros_like(A)
